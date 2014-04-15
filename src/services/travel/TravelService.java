@@ -25,7 +25,6 @@ import java.nio.ByteOrder;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -233,9 +232,7 @@ public class TravelService implements INetworkDispatch {
 	
 	public void loadTravelPoints() {
 		List<Planet> planetList = core.terrainService.getPlanetList();
-		for (Planet planet : planetList) {
-			addPlanet(planet);
-		}
+		planetList.forEach(this::addPlanet);
 		populateTravelFares();
 	}
 	

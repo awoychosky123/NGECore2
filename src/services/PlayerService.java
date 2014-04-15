@@ -32,6 +32,7 @@ import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -52,16 +53,22 @@ import protocol.swg.ObjControllerMessage;
 import protocol.swg.PlayerMoneyResponse;
 import protocol.swg.ServerTimeMessage;
 import protocol.swg.SetWaypointColor;
+import protocol.swg.ShowBackpack;
+import protocol.swg.ShowHelmet;
 import protocol.swg.objectControllerObjects.ChangeRoleIconChoice;
 import protocol.swg.objectControllerObjects.ShowFlyText;
 import protocol.swg.objectControllerObjects.ShowLootBox;
 import resources.common.FileUtilities;
 import resources.common.ObjControllerOpcodes;
 import resources.common.Opcodes;
+import resources.common.OutOfBand;
+import resources.common.ProsePackage;
 import resources.common.RGB;
 import resources.common.SpawnPoint;
 import resources.common.StringUtilities;
+import resources.datatables.DisplayType;
 import resources.datatables.PlayerFlags;
+import resources.datatables.Professions;
 import resources.guild.Guild;
 import resources.objects.Buff;
 import resources.objects.building.BuildingObject;
@@ -95,47 +102,49 @@ public class PlayerService implements INetworkDispatch {
 	
 	private NGECore core;
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(1);
-    
+    private float xpMultiplier;
     protected final Object objectMutex = new Object();
+    private ConcurrentHashMap<Long, List<ScheduledFuture<?>>> schedulers = new ConcurrentHashMap<Long, List<ScheduledFuture<?>>>();
     
 	public PlayerService(final NGECore core) {
 		this.core = core;
-		
+		this.xpMultiplier = (float) core.getConfig().getDouble("XPMULTIPLIER");
+		if(xpMultiplier == 0)
+			xpMultiplier = 1;
 	}
 	
 	public void postZoneIn(final CreatureObject creature) {
 		
-		scheduler.scheduleAtFixedRate(() -> {
+		if(schedulers.get(creature.getObjectID()) != null)
+			return;
+		List<ScheduledFuture<?>> scheduleList = new ArrayList<ScheduledFuture<?>>();
+		scheduleList.add(scheduler.scheduleAtFixedRate(() -> {
 			ServerTimeMessage time = new ServerTimeMessage(core.getGalacticTime() / 1000);
 			IoBuffer packet = time.serialize();
 			creature.getClient().getSession().write(packet);
-		}, 45, 45, TimeUnit.SECONDS);
+		}, 45, 45, TimeUnit.SECONDS));
 		
-		scheduler.scheduleAtFixedRate(() -> {
+		scheduleList.add(scheduler.scheduleAtFixedRate(() -> {
 			PlayerObject player = (PlayerObject) creature.getSlottedObject("ghost");
 			player.setTotalPlayTime((int) (player.getTotalPlayTime() + ((System.currentTimeMillis() - player.getLastPlayTimeUpdate()) / 1000)));
 			player.setLastPlayTimeUpdate(System.currentTimeMillis());
 			core.collectionService.checkExplorationRegions(creature);
-		}, 30, 30, TimeUnit.SECONDS);
+		}, 30, 30, TimeUnit.SECONDS));
 		
-		scheduler.scheduleAtFixedRate(() -> {
-			synchronized(creature.getMutex()) {
-				if(creature.getAction() < creature.getMaxAction() && creature.getPosture() != 14) {
-					if(creature.getCombatFlag() == 0)
-						creature.setAction(creature.getAction() + (15 + creature.getLevel() * 5));
-					else
-						creature.setAction(creature.getAction() + ((15 + creature.getLevel() * 5) / 2));
-				}
+		scheduleList.add(scheduler.scheduleAtFixedRate(() -> {
+			if(creature.getAction() < creature.getMaxAction() && creature.getPosture() != 14) {
+				if(creature.getCombatFlag() == 0)
+					creature.setAction(creature.getAction() + (15 + creature.getLevel() * 5));
+				else
+					creature.setAction(creature.getAction() + ((15 + creature.getLevel() * 5) / 2));
 			}
-		}, 0, 1000, TimeUnit.MILLISECONDS);
+		}, 0, 1000, TimeUnit.MILLISECONDS));
 
-		scheduler.scheduleAtFixedRate(() -> {
-			synchronized(creature.getMutex()) {
-				if(creature.getHealth() < creature.getMaxHealth() && creature.getCombatFlag() == 0 && creature.getPosture() != 13 && creature.getPosture() != 14)
-					creature.setHealth(creature.getHealth() + (36 + creature.getLevel() * 4));
-			}
-		}, 0, 1000, TimeUnit.MILLISECONDS);
-		
+		scheduleList.add(scheduler.scheduleAtFixedRate(() -> {
+			if(creature.getHealth() < creature.getMaxHealth() && creature.getCombatFlag() == 0 && creature.getPosture() != 13 && creature.getPosture() != 14)
+				creature.setHealth(creature.getHealth() + (36 + creature.getLevel() * 4));
+		}, 0, 1000, TimeUnit.MILLISECONDS));
+		schedulers.put(creature.getObjectID(), scheduleList);
 		/*final PlayerObject ghost = (PlayerObject) creature.getSlottedObject("ghost");
 		scheduler.schedule(new Runnable() {
 
@@ -153,27 +162,79 @@ public class PlayerService implements INetworkDispatch {
 
 	@Override
 	public void insertOpcodes(Map<Integer, INetworkRemoteEvent> swgOpcodes, Map<Integer, INetworkRemoteEvent> objControllerOpcodes) {
-		
-		objControllerOpcodes.put(ObjControllerOpcodes.ChangeRoleIconChoice, (session, data) -> {
-			
-			Client c = core.getClient(session);
-			ChangeRoleIconChoice packet = new ChangeRoleIconChoice();
-			PlayerObject player;
-			SWGObject o;
-			
-			packet.deserialize(data);
-			o = core.objectService.getObject(packet.getObjectId());
-			
-			if (c.getParent() == null || o == null || c.getParent() != o
-			|| !(o instanceof CreatureObject) || !(o.getSlottedObject("ghost")
-			instanceof PlayerObject)) {
+
+		swgOpcodes.put(Opcodes.ShowBackpack, (session, data) -> {
+			data.order(ByteOrder.LITTLE_ENDIAN);
+
+			Client client = core.getClient(session);
+
+			if (client == null)
 				return;
-			}
-			
-			player = (PlayerObject) o.getSlottedObject("ghost");
-			
+
+			SWGObject player = client.getParent();
+
+			if (player == null)
+				return;
+
+			PlayerObject ghost = (PlayerObject) player.getSlottedObject("ghost");
+
+			if (ghost == null)
+				return;
+
+			ShowBackpack sentPacket = new ShowBackpack();
+			sentPacket.deserialize(data);
+
+			ghost.setShowBackpack(sentPacket.isShowBackpack());
+		});
+
+		swgOpcodes.put(Opcodes.ShowHelmet, (session, data) -> {
+			data.order(ByteOrder.LITTLE_ENDIAN);
+
+			Client client = core.getClient(session);
+
+			if (client == null)
+				return;
+
+			SWGObject player = client.getParent();
+
+			if (player == null)
+				return;
+
+			PlayerObject ghost = (PlayerObject) player.getSlottedObject("ghost");
+
+			if (ghost == null)
+				return;
+
+			ShowHelmet sentPacket = new ShowHelmet();
+			sentPacket.deserialize(data);
+
+			ghost.setShowHelmet(sentPacket.isShowHelmet());
+		});
+
+		objControllerOpcodes.put(ObjControllerOpcodes.ChangeRoleIconChoice, (session, data) -> {
+
+			Client client = core.getClient(session);
+
+			if (client == null)
+				return;
+
+			SWGObject object = client.getParent();
+
+			if (object == null)
+				return;
+
+			PlayerObject player = (PlayerObject) object.getSlottedObject("ghost");
+
+			if (player == null)
+				return;
+
+			data.order(ByteOrder.LITTLE_ENDIAN);
+
+			ChangeRoleIconChoice packet = new ChangeRoleIconChoice();
+			packet.deserialize(data);
+
 			player.setProfessionIcon(packet.getIcon());
-			
+
 		});
 		
 		swgOpcodes.put(Opcodes.SetWaypointColor, (session, data) -> {
@@ -303,11 +364,7 @@ public class PlayerService implements INetworkDispatch {
 		swgOpcodes.put(Opcodes.SetLfgInterests, (session, data) -> {
 
 		});
-		
-		swgOpcodes.put(Opcodes.CommodotiesItemTypeListRequest, (session, data) -> {
-
-		});
-		
+				
 		swgOpcodes.put(Opcodes.SetFurnitureRoationDegree, (session, data) -> {
 
 		});
@@ -408,7 +465,7 @@ public class PlayerService implements INetworkDispatch {
 			if(preDesignatedCloner != null) 
 				cloneData.put(preDesignatedCloner.getObjectID(), core.mapService.getClosestCityName(preDesignatedCloner) /*+ " (" + String.valueOf(position.getDistance2D(cloner.getPosition())) + "m)"*/);
 		}
-		final long preDesignatedObjectId = preDesignatedCloner.getObjectID();
+		final long preDesignatedObjectId = (preDesignatedCloner != null) ? preDesignatedCloner.getObjectID() : 0;
 		cloners.stream().filter(c -> c.getObjectID() != preDesignatedObjectId).forEach(c -> cloneData.put(c.getObjectID(), core.mapService.getClosestCityName(c)));
 		
 		final SUIWindow window = core.suiService.createListBox(ListBoxType.LIST_BOX_OK_CANCEL, "@base_player:revive_title", "Select the desired option and click OK.", 
@@ -451,12 +508,13 @@ public class PlayerService implements INetworkDispatch {
 		if(cell == null)
 			return;
 		
+		creature.setPosture((byte) 0);
+		
 		core.simulationService.transferToPlanet(creature, cloner.getPlanet(), spawnPoint.getPosition(), spawnPoint.getOrientation(), cell);
 		
 		creature.setHealth(creature.getMaxHealth());
 		creature.setAction(creature.getMaxAction());
 		
-		creature.setPosture((byte) 0);
 		creature.setSpeedMultiplierBase(1);
 		creature.setTurnRadius(1);
 		
@@ -472,6 +530,304 @@ public class PlayerService implements INetworkDispatch {
 	}
 	
 	/*
+	 * Respecs to the specified profession.
+	 */
+	public void respec(CreatureObject creature, String profession) {
+		DatatableVisitor experienceTable;
+		PlayerObject player = (PlayerObject) creature.getSlottedObject("ghost");
+		int level = 0;
+		
+		if (creature == null || player == null) {
+			return;
+		}
+		
+		if (profession == null || profession.equals("")) {
+			return;
+		}
+		
+		player.setProfession(profession);
+
+		String xpType = ((profession.contains("entertainer")) ? "entertainer" : ((profession.contains("trader")) ? "crafting" : "combat_general"));
+			
+		int experience = player.getXp(xpType);
+		
+		try {
+			experienceTable = ClientFileManager.loadFile("datatables/player/player_level.iff", DatatableVisitor.class);
+			
+			for (int i = 0; i < experienceTable.getRowCount(); i++) {
+				if (experienceTable.getObject(i, 0) != null) {
+					if (experience >= ((Integer) experienceTable.getObject(i, 1))) {
+						level = (Integer) experienceTable.getObject(i, 0);
+					}
+				}
+			}
+		} catch (InstantiationException | IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		
+		grantLevel(creature, level);
+		
+		player.setProfessionIcon(Professions.get(profession));
+	}
+	
+	/*
+	 * Resets to level 1
+	 */
+	public void resetLevel(CreatureObject creature) {
+		PlayerObject player = (PlayerObject) creature.getSlottedObject("ghost");
+		
+		try
+		{
+        		for (SWGObject equipment : new ArrayList<SWGObject>(creature.getEquipmentList())) {
+        			if (equipment == null) {
+        				continue;
+        			}
+        			
+        			switch (equipment.getTemplate()) {
+        				case "object/tangible/inventory/shared_character_inventory.iff":
+        				case "object/tangible/inventory/shared_appearance_inventory.iff":
+        				case "object/tangible/datapad/shared_character_datapad.iff":
+        				case "object/tangible/bank/shared_character_bank.iff":
+        				case "object/tangible/mission_bag/shared_mission_bag.iff":
+        				case "object/weapon/creature/shared_creature_default_weapon.iff":
+        					continue;
+        				default:
+        					core.equipmentService.unequip(creature, equipment);
+        			}
+        		}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+		
+		//for (SWGObject equipment : creature.getAppearanceEquipmentList()) {
+			//core.equipmentService.unequip(creature, equipment);
+		//}
+		
+		for (Buff buff : creature.getBuffList()) {
+			if (buff.isRemoveOnRespec()) {
+				core.buffService.removeBuffFromCreature(creature, buff);
+			}
+		}
+		
+		try {
+			String[] skills;
+			
+			DatatableVisitor skillTemplate = ClientFileManager.loadFile("datatables/skill_template/skill_template.iff", DatatableVisitor.class);
+			
+			for (int s = 0; s < skillTemplate.getRowCount(); s++) {
+				if (skillTemplate.getObject(s, 0) != null) {
+					if (((String) skillTemplate.getObject(s, 0)).equals(player.getProfession())) {
+						skills = ((String) skillTemplate.getObject(s, 4)).split(",");
+						
+						for (String skill : skills) {
+							core.skillService.removeSkill(creature, skill);
+						}
+						
+						core.skillService.addSkill(creature, skills[0]);
+						
+						break;
+					}
+				}
+			}
+		}  catch (InstantiationException | IllegalAccessException e) {
+			e.printStackTrace();
+		}
+		
+		core.skillService.resetExpertise(creature);
+		
+		String xpType = ((player.getProfession().contains("entertainer")) ? "entertainer" : ((player.getProfession().contains("trader")) ? "crafting" : "combat_general"));
+			
+		player.setXp(xpType, 0);
+		
+		player.setProfessionWheelPosition("");
+		
+		core.skillModService.deductSkillMod(creature, "luck", creature.getSkillModBase("luck"));
+		core.skillModService.deductSkillMod(creature, "precision", creature.getSkillModBase("precision"));
+		core.skillModService.deductSkillMod(creature, "strength", creature.getSkillModBase("strength"));
+		core.skillModService.deductSkillMod(creature, "constitution", creature.getSkillModBase("constitution"));
+		core.skillModService.deductSkillMod(creature, "stamina", creature.getSkillModBase("stamina"));
+		core.skillModService.deductSkillMod(creature, "agility", creature.getSkillModBase("agility"));
+		creature.setMaxHealth(1000);
+		creature.setHealth(1000);
+		creature.setMaxAction(300);
+		creature.setAction(300);
+		creature.setGrantedHealth(0);
+		
+		creature.setLevel((short) 1);
+	}
+	
+	/*
+	 * Grants the specified level.
+	 * 1. Grant the experience.
+	 * 2. Add the relevant health/action and expertise points.
+	 * 3. Add skills and roadmap items.
+	 */
+	public void grantLevel(CreatureObject creature, int level) {
+		DatatableVisitor experienceTable;
+		PlayerObject player = (PlayerObject) creature.getSlottedObject("ghost");
+		int experience = 0;
+		
+		if (player == null) {
+			return;
+		}
+		
+		if(level == 0) return;
+		
+		resetLevel(creature);
+		
+		try {
+			experienceTable = ClientFileManager.loadFile("datatables/player/player_level.iff", DatatableVisitor.class);
+			
+			// 1. Grant the experience.
+			experience = (Integer) experienceTable.getObject((level - 1), 1);
+			
+			String xpType = ((player.getProfession().contains("entertainer")) ? "entertainer" : ((player.getProfession().contains("trader")) ? "crafting" : "combat_general"));
+			
+			player.setXp(xpType, experience);
+			
+
+			// 2. Add the relevant health/action and expertise points.
+			float luck = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getLuck").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getLuck").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float precision = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getPrecision").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getPrecision").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float strength = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getStrength").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getStrength").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float constitution = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getConstitution").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getConstitution").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float stamina = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getStamina").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getStamina").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float agility = (((((float) (core.scriptService.getMethod("scripts/roadmap/", player.getProfession(), "getAgility").__call__().asInt()) + (core.scriptService.getMethod("scripts/roadmap/", creature.getStfName(), "getAgility").__call__().asInt())) / ((float) 90)) * ((float) level)));
+			float health = (100 * level);
+			float action = (75 * level);
+			
+			int healthGranted = ((Integer) experienceTable.getObject((level - 1), 4));;
+			
+			// 3. Add skills and roadmap items.
+			for (int i = 1; i <= level; i++) {
+				if ((i == 4 || i == 7 || i == 10) || ((i > 10) && (((i - 10)  % 4) == 0))) {
+					int skill = ((i <= 10) ? ((i - 1) / 3) : ((((i - 10) / 4)) + 3));
+					String roadmapSkillName = "";
+					DatatableVisitor skillTemplate, roadmap;
+					
+					try {
+						skillTemplate = ClientFileManager.loadFile("datatables/skill_template/skill_template.iff", DatatableVisitor.class);
+						
+						for (int s = 0; s < skillTemplate.getRowCount(); s++) {
+							if (skillTemplate.getObject(s, 0) != null) {
+								if (((String) skillTemplate.getObject(s, 0)).equals(player.getProfession())) {
+									String[] skillArray = ((String) skillTemplate.getObject(s, 4)).split(",");
+									roadmapSkillName = skillArray[skill];
+									break;
+								}
+							}
+						}
+						
+						core.skillService.addSkill(creature, roadmapSkillName);
+						player.setProfessionWheelPosition(roadmapSkillName);
+					}  catch (InstantiationException | IllegalAccessException e) {
+						e.printStackTrace();
+					}
+					
+					try {
+						roadmap = ClientFileManager.loadFile("datatables/roadmap/item_rewards.iff", DatatableVisitor.class);
+						
+						for (int s = 0; s < roadmap.getRowCount(); s++) {
+							if (roadmap.getObject(s, 0) != null) {
+								if (((String) roadmap.getObject(s, 1)).equals(roadmapSkillName)) {
+									String[] apts = ((String) roadmap.getObject(s, 2)).split(",");
+									String[] items = ((String) roadmap.getObject(s, 4)).split(",");
+									String[] wookieeItems = ((String) roadmap.getObject(s, 5)).split(",");
+									String[] ithorianItems = ((String) roadmap.getObject(s, 6)).split(",");
+									
+									int arrayLength = items.length;
+									
+									if (wookieeItems.length > 0 && creature.getStfName().contains("wookiee"))
+										arrayLength = wookieeItems.length;
+									else if (ithorianItems.length > 0 && creature.getStfName().contains("ithorian"))
+										arrayLength = ithorianItems.length;
+
+									for (int n = 0; n < arrayLength; n++) {
+										String item = items[n];
+										
+										if (creature.getStfName().contains("wookiee"))
+											item = wookieeItems[n];
+										else if (creature.getStfName().contains("ithorian"))
+											item = ithorianItems[n];
+										
+										try {
+											String customServerTemplate = null;
+											
+											if (item.contains("/")) {
+												item = (item.substring(0, (item.lastIndexOf("/") + 1)) + "shared_" + item.substring((item.lastIndexOf("/") + 1)));
+											} else {
+												customServerTemplate = item;
+												item = core.scriptService.callScript("scripts/roadmap/", player.getProfession(), "getRewards", item).asString();
+											}
+											
+											if (item != null && item != "") {
+												SWGObject itemObj = core.objectService.createObject(item, 0, creature.getPlanet(), new Point3D(0, 0, 0), new Quaternion(1, 0, 0, 0), customServerTemplate);
+											} else {
+												//System.out.println("Can't find template: " + item);
+											}
+										} catch (Exception e) {
+											e.printStackTrace();
+										}
+									}
+													
+								}
+							}
+						}				
+					} catch (InstantiationException | IllegalAccessException e) {
+						e.printStackTrace();
+					}
+				}
+			}
+			
+			if (luck >= 1) {
+				core.skillModService.addSkillMod(creature, "luck", (int) luck);
+			}
+			
+			if (precision >= 1) {
+				core.skillModService.addSkillMod(creature, "precision", (int) precision);
+			}
+			
+			if (strength >= 1) {
+				core.skillModService.addSkillMod(creature, "strength", (int) strength);
+			}
+			
+			if (constitution >= 1) {
+				core.skillModService.addSkillMod(creature, "constitution", (int) constitution);
+			}
+			
+			if (stamina >= 1) {
+				core.skillModService.addSkillMod(creature, "stamina", (int) stamina);
+			}
+			
+			if (agility >= 1) {
+				core.skillModService.addSkillMod(creature, "agility", (int) agility);
+			}
+			
+			if (health >= 1) {
+				creature.setMaxHealth((creature.getMaxHealth() + (int) health + (healthGranted - creature.getGrantedHealth())));
+				creature.setHealth(creature.getMaxHealth());
+			}
+			
+			if (action >= 1) {
+				creature.setMaxAction((creature.getMaxAction() + (int) action));
+				creature.setAction(creature.getMaxAction());
+			}
+			
+			creature.setGrantedHealth(healthGranted);
+			
+			creature.getClient().getSession().write((new ClientMfdStatusUpdateMessage((float) ((level >= 90) ? 90 : (level + 1)), "/GroundHUD.MFDStatus.vsp.role.targetLevel")).serialize());
+			creature.setLevel((short) level);
+			core.scriptService.callScript("scripts/collections/", "master_" + player.getProfession(), "addMasterBadge", core, creature);
+			
+			creature.showFlyText(OutOfBand.ProsePackage("@cbt_spam:skill_up"), 2.5f, new RGB(154, 205, 50), 0, true);
+			creature.playEffectObject("clienteffect/skill_granted.cef", "");
+			creature.playMusic("sound/music_acq_bountyhunter.snd");
+		} catch (InstantiationException | IllegalAccessException e) {
+			e.printStackTrace();
+		}
+	}
+	
+	/*
 	 * Gives experience.  If they have enough experience, it auto-levels them up.
 	 * 
 	 * First, it adds the experience.
@@ -483,6 +839,11 @@ public class PlayerService implements INetworkDispatch {
 	public void giveExperience(CreatureObject creature, int experience) {
 		DatatableVisitor experienceTable;
 		PlayerObject player = (PlayerObject) creature.getSlottedObject("ghost");
+		experience *= xpMultiplier;
+		
+		if (creature.getLevel() >= 90) {
+			return;
+		}
 		
 		//synchronized(objectMutex) {
 			try {
@@ -496,8 +857,8 @@ public class PlayerService implements INetworkDispatch {
 				experience += ((experience * experienceBonus) / 100);
 				
 				// 1. Add the experience.
-				if (experience > 0) {
-					creature.showFlyText("base_player", "prose_flytext_xp", "", experience, (float) 2.5, new RGB(180, 60, 240), 1);
+				if (experience > 0 && !creature.isStationary()) {
+					creature.showFlyText(OutOfBand.ProsePackage("@base_player:prose_flytext_xp", experience), 2.5f, new RGB(180, 60, 240), 1, true);
 				}
 				
 				String xpType = ((player.getProfession().contains("entertainer")) ? "entertainer" : ((player.getProfession().contains("trader")) ? "crafting" : "combat_general"));
@@ -532,49 +893,49 @@ public class PlayerService implements INetworkDispatch {
 								
 								if (luck >= 1) {
 									core.skillModService.addSkillMod(creature, "luck", (int) luck);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_0", (int) luck, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_0", (int) luck), DisplayType.Broadcast);
 								}
 								
 								if (precision >= 1) {
 									core.skillModService.addSkillMod(creature, "precision", (int) precision);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_1", (int) precision, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_1", (int) precision), DisplayType.Broadcast);
 								}
 								
 								if (strength >= 1) {
 									core.skillModService.addSkillMod(creature, "strength", (int) strength);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_2", (int) strength, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_2", (int) strength), DisplayType.Broadcast);
 								}
 								
 								if (constitution >= 1) {
 									core.skillModService.addSkillMod(creature, "constitution", (int) constitution);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_3", (int) constitution, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_3", (int) constitution), DisplayType.Broadcast);
 								}
 								
 								if (stamina >= 1) {
 									core.skillModService.addSkillMod(creature, "stamina", (int) stamina);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_4", (int) stamina, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_4", (int) stamina), DisplayType.Broadcast);
 								}
 								
 								if (agility >= 1) {
 									core.skillModService.addSkillMod(creature, "agility", (int) agility);
-									creature.sendSystemMessage("spam", "level_up_stat_gain_5", (int) agility, 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_5", (int) agility), DisplayType.Broadcast);
 								}
 								
 								if (health >= 1) {
 									creature.setMaxHealth((creature.getMaxHealth() + (int) health + (healthGranted - creature.getGrantedHealth())));
 									creature.setHealth(creature.getMaxHealth());
-									creature.sendSystemMessage("spam", "level_up_stat_gain_6", (((int) health) + (((int) constitution) * 8) + (((int) stamina) * 2)), 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_6", (((int) health) + (((int) constitution) * 8) + (((int) stamina) * 2))), DisplayType.Broadcast);
 								}
 								
 								if (action >= 1) {
 									creature.setMaxAction((creature.getMaxAction() + (int) action));
 									creature.setAction(creature.getMaxAction());
-									creature.sendSystemMessage("spam", "level_up_stat_gain_7", (((int) action) + (((int) stamina) * 8) + (((int) constitution) * 2)), 0);
+									creature.sendSystemMessage(OutOfBand.ProsePackage("@spam:level_up_stat_gain_7", (((int) action) + (((int) stamina) * 8) + (((int) constitution) * 2))), DisplayType.Broadcast);
 								}
 								
 								creature.setGrantedHealth(((Integer) experienceTable.getObject(i, 4)));
 								// -> Expertise point added automatically by client
-								creature.showFlyText("cbt_spam", "level_up", (float) 2.5, new RGB(100, 149, 237), 0);
+								creature.showFlyText(OutOfBand.ProsePackage("@cbt_spam:level_up"), 2.5f, new RGB(100, 149, 237), 0, true);
 								
 								// 4. Adds roadmap rewards
 								int level = creature.getLevel();
@@ -597,7 +958,7 @@ public class PlayerService implements INetworkDispatch {
 											}
 										}
 										
-										creature.showFlyText("cbt_spam", "skill_up", (float) 2.5, new RGB(154, 205, 50), 0);
+										creature.showFlyText(OutOfBand.ProsePackage("@cbt_spam:skill_up"), 2.5f, new RGB(154, 205, 50), 0, true);
 										creature.playEffectObject("clienteffect/skill_granted.cef", "");
 										creature.playMusic("sound/music_acq_bountyhunter.snd");
 										core.skillService.addSkill(creature, roadmapSkillName);
@@ -890,10 +1251,33 @@ public class PlayerService implements INetworkDispatch {
 		core.suiService.openSUIWindow(ringWindow);
 	}
 	
+	public String getFormalProfessionName(String template) {
+		String formalName = "";
+
+		switch (template) {
+		case "force_sensitive_1a":	formalName = "Jedi"; break;
+		case "bounty_hunter_1a":	formalName = "Bounty Hunter"; break;
+		case "officer_1a":			formalName = "Officer"; break;
+		case "smuggler_1a":			formalName = "Smuggler"; break;
+		case "entertainer_1a":		formalName = "Entertainer"; break;
+		case "spy_1a":				formalName = "Spy"; break;
+		case "medic_1a":			formalName = "Medic"; break;
+		case "commando_1a":			formalName = "Commando"; break;
+		
+		default:					formalName = "Trader"; break;	// Ziggy: Trader profession names are a bit irregular, so this is used.
+
+		}
+		return formalName;
+	}
+	
 	@Override
 	public void shutdown() {
 		// TODO Auto-generated method stub
 		
+	}
+	
+	public Map<Long, List<ScheduledFuture<?>>> getSchedulers() {
+		return schedulers;
 	}
 	
 }

@@ -21,8 +21,6 @@
  ******************************************************************************/
 package protocol.swg.objectControllerObjects;
 
-import java.io.UnsupportedEncodingException;
-import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.Vector;
 
@@ -30,7 +28,6 @@ import org.apache.mina.core.buffer.IoBuffer;
 
 import protocol.swg.ObjControllerMessage;
 import resources.common.IDAttribute;
-import resources.common.StringUtilities;
 
 public class ImageDesignMessage extends ObjControllerObject {
 
@@ -69,9 +66,7 @@ public class ImageDesignMessage extends ObjControllerObject {
 	
 	@Override
 	public void deserialize(IoBuffer data) {
-		System.out.println("===== Recieved Packet ======");
-		StringUtilities.printBytes(data.array());
-		
+
 		setObjectId(data.getLong());
 		data.getInt();
 		setDesignerId(data.getLong());
@@ -224,7 +219,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setObjectId(long objectId) {
-		System.out.println("OBJECT ID: " + objectId);
 		this.objectId = objectId;
 	}
 
@@ -233,7 +227,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setUnkByte(byte unkByte) {
-		System.out.println("Set unk byte to " + unkByte);
 		this.unkByte = unkByte;
 	}
 
@@ -250,7 +243,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setUnk(String unk) {
-		System.out.println("Set UNK to " + unk);
 		this.unk = unk;
 	}
 
@@ -307,7 +299,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setBodyFormSkill1(int bodyFormSkill1) {
-		System.out.println("Set body form skill 1 to " + bodyFormSkill1);
 		this.bodyFormSkill1 = bodyFormSkill1;
 	}
 
@@ -316,7 +307,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setFaceFormSkill1(int faceFormSkill1) {
-		System.out.println("Set face form skill 1 to " + faceFormSkill1);
 		this.faceFormSkill1 = faceFormSkill1;
 	}
 
@@ -325,7 +315,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setBodyFormSkill2(int bodyFormSkill2) {
-		System.out.println("Set body form skill 2 to " + bodyFormSkill2);
 		this.bodyFormSkill2 = bodyFormSkill2;
 	}
 
@@ -334,7 +323,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setFaceFormSkill2(int faceFormSkill2) {
-		System.out.println("Set face form skill 2 to " + faceFormSkill2);
 		this.faceFormSkill2 = faceFormSkill2;
 	}
 
@@ -343,7 +331,6 @@ public class ImageDesignMessage extends ObjControllerObject {
 	}
 
 	public void setHoloEmote(String holoEmote) {
-		System.out.println("Holoemote set to " + holoEmote);
 		this.holoEmote = holoEmote;
 	}
 

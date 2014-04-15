@@ -26,14 +26,11 @@ import java.util.Map.Entry;
 import java.util.Random;
 import java.util.Vector;
 
-import resources.objects.cell.CellObject;
 import resources.objects.creature.CreatureObject;
 import resources.objects.group.GroupObject;
 import resources.objects.player.PlayerObject;
 
-import engine.resources.scene.Planet;
 import engine.resources.scene.Point3D;
-import engine.resources.scene.Quaternion;
 
 import main.NGECore;
 
@@ -77,7 +74,7 @@ public class AIService {
 			float damagePercent = damage / creature.getMaxHealth();
 			int finalXP = (int) (damagePercent * baseXP);
 			finalXP -= ((levelDifference > 20) ? (finalXP - 1) : (((levelDifference * 5) / 100) * finalXP));	
-			
+			core.playerService.giveExperience(player, finalXP);
 		}
 		
 	}
@@ -101,6 +98,8 @@ public class AIService {
 
 		}
 		
+		
+		//TODO: this is slightly inaccurate if the xp table in the prima guide is correct
 		if(difficulty == 1) {
 			baseXP += (6 + ((creature.getLevel() - 1) / 10) * 3);
 		} else if(difficulty == 2) {

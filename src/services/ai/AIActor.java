@@ -22,7 +22,6 @@
 package services.ai;
 
 import java.util.Map;
-import java.util.Map.Entry;
 import java.util.Vector;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -30,7 +29,6 @@ import java.util.concurrent.TimeUnit;
 
 import main.NGECore;
 import net.engio.mbassy.listener.Handler;
-
 import engine.resources.objects.SWGObject;
 import engine.resources.scene.Point3D;
 import engine.resources.scene.Quaternion;
@@ -43,7 +41,6 @@ import services.ai.states.AttackState;
 import services.ai.states.DeathState;
 import services.ai.states.IdleState;
 import services.ai.states.RetreatState;
-import services.ai.states.SpawnState;
 import services.combat.CombatEvents.DamageTaken;
 import services.spawn.MobileTemplate;
 
@@ -120,12 +117,16 @@ public class AIActor {
 	}
 
 	public void setCurrentState(AIState currentState) {
-		if(currentState.getClass() == this.currentState.getClass())
-			return;
-		if(this.currentState != null)
-			doStateAction(this.currentState.onExit(this));
-		this.currentState = currentState;
-		doStateAction(currentState.onEnter(this));
+		try {
+			if(currentState.getClass() == this.currentState.getClass())
+				return;
+			if(this.currentState != null) 
+				doStateAction(this.currentState.onExit(this));
+			this.currentState = currentState;
+			doStateAction(currentState.onEnter(this));
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
 	}
 
 	public CreatureObject getFollowObject() {
@@ -153,11 +154,23 @@ public class AIActor {
 	}
 	
 	public void scheduleMovement() {
-		scheduler.schedule(() -> doStateAction(currentState.move(AIActor.this)), 500, TimeUnit.MILLISECONDS);
+		scheduler.schedule(() -> { 
+			try {
+				doStateAction(currentState.move(AIActor.this));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}, 500, TimeUnit.MILLISECONDS);
 	}
 	
 	public void scheduleRecovery() {
-		scheduler.schedule(() -> doStateAction(currentState.recover(AIActor.this)), 2000, TimeUnit.MILLISECONDS);
+		scheduler.schedule(() -> { 
+			try {
+				doStateAction(currentState.recover(AIActor.this));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		}, 2000, TimeUnit.MILLISECONDS);
 	}
 	
 	public void setNextPosition(Point3D position) {
@@ -222,7 +235,6 @@ public class AIActor {
 			case StateResult.DEAD:
 				setCurrentState(new DeathState());
 			case StateResult.FINISHED:
-				// TODO: add state transitions
 			case StateResult.UNFINISHED:
 				return;
 			case StateResult.IDLE:
@@ -233,4 +245,16 @@ public class AIActor {
 		}
 		
 	}
+	
+	public void scheduleDespawn() {
+		scheduler.schedule(() -> {
+			
+			damageMap.clear();
+			followObject = null;
+			creature.setAttachment("AI", null);
+			NGECore.getInstance().objectService.destroyObject(creature);
+			
+		}, 30000, TimeUnit.MILLISECONDS);
+	}
+	
 }

@@ -21,8 +21,6 @@
  ******************************************************************************/
 package resources.common;
 
-import java.math.BigInteger;
-
 public class IDAttribute {
 
 	private float floatValue;
@@ -53,11 +51,6 @@ public class IDAttribute {
 
 	public void setValue(int value) {
 		this.value = value;
-	}
-
-	public byte[] getHexValue() {
-		System.out.println(BigInteger.valueOf(value).toByteArray());
-		return BigInteger.valueOf(value).toByteArray();
 	}
 
 }
